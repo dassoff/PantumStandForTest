@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # Основной сервис тестирования
+  print-test:
+    build: .
+    container_name: print-test-stand
+    volumes:
+      - ./reports:/app/reports
+      - ./config:/app/config
+    environment:
+      - PRINT_PRINTER_IP=${PRINT_PRINTER_IP:-192.168.1.100}
+      - PRINT_PRINTER_PORT=${PRINT_PRINTER_PORT:-9100}
+      - PRINT_TCP_TIMEOUT=${PRINT_TCP_TIMEOUT:-10}
+    network_mode: host  # Для доступа к локальному принтеру
+    restart: "no"
+
+  # FastAPI сервис для интеграции
+  api:
+    build: .
+    container_name: print-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./reports:/app/reports
+      - ./config:/app/config
+    environment:
+      - PRINT_PRINTER_IP=${PRINT_PRINTER_IP:-192.168.1.100}
+      - PRINT_PRINTER_PORT=${PRINT_PRINTER_PORT:-9100}
+    network_mode: host
+    command: ["uvicorn", "integration.fastapi_endpoint:app", "--host", "0.0.0.0", "--port", "8000"]
+    profiles:
+      - api
+
+  # Сервис для бенчмарков
+  benchmark:
+    build: .
+    container_name: print-benchmark
+    volumes:
+      - ./reports:/app/reports
+    environment:
+      - PRINT_PRINTER_IP=${PRINT_PRINTER_IP:-192.168.1.100}
+      - PRINT_PRINTER_PORT=${PRINT_PRINTER_PORT:-9100}
+    network_mode: host
+    command: ["python", "run_tests.py", "benchmark", "--iterations", "10"]
+    profiles:
+      - benchmark
+
+# Сеть для доступа к принтеру
+networks:
+  default:
+    name: print-network
