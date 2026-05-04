@@ -1,270 +1,63 @@
-# Print Test Stand для Pantum BM5100ADN
+# Pantum BP5100DW Advanced Test Stand
 
-Тестовый стенд для валидации сценариев печати перед интеграцией в основное приложение.
+Профессиональный инженерный стенд для тестирования и оптимизации высокопроизводительной печати на принтерах **Pantum BP5100DW** (и аналогичных серий BM/BP). 
 
-## Требования
+Спроектирован для разработчиков киосков самообслуживания, систем автоматизации и высоконагруженных систем печати.
 
-- Python 3.10+
-- Windows 10/11 или Linux
-- Сетевой доступ к принтеру Pantum BM5100ADN
+## 🚀 Ключевые возможности
 
-## Установка
+### 1. Методы сверхбыстрой печати
+*   **Native PDF (TCP 9100)**: Прямая отправка PDF-данных в сокет принтера. Самый быстрый способ, полностью обходящий драйверы Windows.
+*   **Win32 RAW Spooling**: Отправка данных напрямую в очередь Windows Spooler в формате RAW, минимизирующая задержки обработки спулером.
+*   **PJL Job Handling**: Поддержка Printer Job Language для управления именованием заданий, количеством копий и режимами плотности.
 
+### 2. Оптимизация производительности (Speed Hacks)
+*   **PDF Flattening (PyMuPDF)**: "Сплющивание" сложного PDF в высококачественный растр на стороне ПК. Позволяет слабому процессору принтера начать печать мгновенно.
+*   **Smart Fuser Pre-heat**: Команда принудительного прогрева печки ("Wake Up") без печати листа. Идеально для подготовки принтера к работе в момент начала взаимодействия пользователя с киоском.
+*   **Ultra-fast Conversion**: Использование библиотеки `fitz` (PyMuPDF) для конвертации изображений и текста в PDF за миллисекунды.
+
+### 3. Диагностика и обратная связь
+*   **SNMP Monitoring**: Живое отображение уровня тонера, общего счетчика страниц и состояния принтера (Jam, No Paper, Ready).
+*   **Automatic Discovery**: Поиск принтеров в локальной сети одним кликом.
+*   **Benchmarking Analytics**: Автоматическое логгирование каждого теста в `print_stats.csv` с точностью до миллисекунд для выбора оптимального метода.
+
+## 📦 Установка
+
+1. Убедитесь, что у вас установлен Python 3.10+.
+2. Установите необходимые зависимости:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## 🛠 Использование
+
+Запустите графический интерфейс тестера:
 ```bash
-cd print-test-stand
-pip install -r requirements.txt
+python gui_tester.py
 ```
 
-## Настройка
+### Основные шаги:
+1. Выберите файл для печати (PDF, DOCX, TXT или изображение).
+2. Нажмите **🔍 Найти принтеры** или введите IP вручную.
+3. (Опционально) Нажмите **🔥 Прогрев печки**, чтобы подготовить фьюзер.
+4. Выберите нужные опции (например, **Сплющивать PDF**) и нажмите **🚀 ЗАПУСТИТЬ ТЕСТИРОВАНИЕ**.
+5. Результаты появятся в журнале и будут сохранены в **📊 Отчет**.
 
-Отредактируйте `config/settings.yaml`:
+## ⚙️ Гайд по настройке (Speed Tuning)
 
-```yaml
-printer:
-  ip: "192.168.1.100"
-  port: 9100
-  protocol: "raw_tcp"
-```
+Для получения времени выхода первого листа **менее 3 секунд**:
 
-## Использование
+1. **В Windows**:
+   - Свойства принтера -> Дополнительно -> Выберите **«Печатать прямо на принтер»** (Print directly to the printer).
+2. **В веб-интерфейсе принтера (Pantum Web UI)**:
+   - Отключите **Тихий режим (Quiet Mode)**.
+   - Отключите **Эко-режим (Eco Mode)**.
+   - Установите таймер сна на максимум (например, 120 минут).
 
-### Быстрый тест
+## 📁 Структура проекта
+*   `gui_tester.py` — основной файл приложения.
+*   `core/` — ядро системы (драйверы, сетевые операции, конвертеры).
+*   `requirements.txt` — список необходимых библиотек.
 
-```bash
-python run_tests.py quick --printer-ip 192.168.1.100
-```
-
-### Полное тестирование
-
-```bash
-python run_tests.py full --printer-ip 192.168.1.100
-```
-
-### Бенчмарк
-
-```bash
-python run_tests.py benchmark --printer-ip 192.168.1.100 --iterations 10
-```
-
-### Печать файла
-
-```bash
-python run_tests.py print-file document.pdf --copies 2 --duplex
-```
-
-### Проверка статуса
-
-```bash
-python run_tests.py status --printer-ip 192.168.1.100
-```
-
-### Валидация конфигурации
-
-```bash
-python run_tests.py validate --config ./config/settings.yaml
-```
-
-## CLI команды
-
-| Команда | Описание |
-|---------|----------|
-| `quick` | Быстрый тест печати (1 страница) |
-| `full` | Полное тестирование всех сценариев |
-| `benchmark` | Бенчмарк производительности |
-| `print-file` | Печать указанного файла |
-| `status` | Проверка статуса принтера |
-| `clean` | Очистка временных файлов |
-| `validate` | Валидация конфигурации |
-
-## Запуск тестов через pytest
-
-```bash
-pytest tests/ -v --printer-ip 192.168.1.100
-```
-
-## Интеграция с FastAPI
-
-```python
-from core.printer import FastPrinter
-
-printer = FastPrinter(printer_ip="192.168.1.100")
-
-# Печать PDF
-job = await printer.print_pdf_fast("document.pdf", copies=1, duplex=True)
-
-# Печать из потока
-job = await printer.print_pdf_stream(pdf_bytes, copies=1)
-
-# Печать DOCX
-job = await printer.print_docx_fast("document.docx", copies=1)
-
-# Статус принтера
-status = await printer.get_status()
-```
-
-## Запуск API сервера
-
-```bash
-uvicorn integration.fastapi_endpoint:app --host 0.0.0.0 --port 8000
-```
-
-Доступные эндпоинты:
-- `POST /print/pdf` — печать PDF файла
-- `POST /print/docx` — печать DOCX файла
-- `GET /printer/status` — статус принтера
-- `POST /printer/cancel` — отмена задания
-
-## Docker
-
-### Сборка
-
-```bash
-docker build -t print-test-stand .
-```
-
-### Запуск
-
-```bash
-docker run --rm --network host \
-  -e PRINT_PRINTER_IP=192.168.1.100 \
-  -v $(pwd)/reports:/app/reports \
-  print-test-stand python run_tests.py quick
-```
-
-### Docker Compose
-
-```bash
-# Тестирование
-docker-compose up print-test
-
-# API сервер
-docker-compose --profile api up api
-
-# Бенчмарк
-docker-compose --profile benchmark up benchmark
-```
-
-## Структура проекта
-
-```
-print-test-stand/
-├── config/
-│   ├── settings.yaml          # Конфигурация принтера и путей
-│   └── validator.py           # Валидация конфигурации
-├── core/
-│   ├── printer.py             # Класс FastPrinter
-│   ├── converters.py          # Конвертация PDF/DOCX
-│   ├── network.py             # RAW TCP и SNMP
-│   └── fallback.py            # Fallback цепочка
-├── tests/
-│   ├── test_pdf.py            # Тесты PDF печати
-│   ├── test_docx.py           # Тесты DOCX печати
-│   ├── test_speed.py          # Бенчмарки скорости
-│   └── test_fallback.py       # Тесты отказоустойчивости
-├── benchmarks/
-│   └── runner.py              # Запуск бенчмарков
-├── integration/
-│   └── fastapi_endpoint.py    # FastAPI приложение
-├── utils/
-│   ├── logger.py              # Логирование
-│   └── helpers.py             # Вспомогательные функции
-├── reports/                   # Отчёты о тестах
-├── requirements.txt
-├── setup.py
-└── run_tests.py               # CLI интерфейс
-```
-
-## Конфигурация
-
-### settings.yaml
-
-```yaml
-printer:
-  name: "Pantum BM5100ADN"
-  ip: "192.168.1.100"
-  port: 9100
-  protocol: "raw_tcp"
-
-  capabilities:
-    duplex: true
-    color: false
-    max_resolution: 600
-
-  defaults:
-    copies: 1
-    duplex: true
-    paper: "A4"
-
-paths:
-  ghostscript: "C:\\Program Files\\gs\\gs10.02.0\\bin\\gswin64c.exe"
-  libreoffice: "C:\\Program Files\\LibreOffice\\program\\soffice.exe"
-  sumatra: "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe"
-
-performance:
-  tcp_timeout: 10
-  conversion_timeout: 30
-  max_concurrent_jobs: 5
-  enable_cache: true
-
-logging:
-  level: "INFO"
-  file: "./reports/print.log"
-  format: "json"
-```
-
-## Методы печати
-
-1. **RAW TCP (PCL6)** — основной метод, максимальная скорость
-2. **SumatraPDF** — fallback через внешний PDF-просмотрщик
-3. **Windows API** — fallback через системную печать
-
-## Зависимости
-
-### Обязательные
-- Python 3.10+
-- fastapi, uvicorn
-- pydantic, pyyaml
-- aiofiles, aiohttp
-- pytest, pytest-asyncio
-- click, rich, structlog
-
-### Опциональные (для конвертации)
-- Ghostscript (PDF → PCL6)
-- LibreOffice (DOCX → PDF)
-- SumatraPDF (fallback печать)
-
-## Troubleshooting
-
-### Принтер не отвечает
-1. Проверьте сетевое подключение
-2. Убедитесь, что IP-адрес верный
-3. Проверьте порт 9100: `telnet 192.168.1.100 9100`
-
-### Ошибка конвертации DOCX
-1. Установите LibreOffice
-2. Укажите путь в `settings.yaml`
-
-### Таймаут печати
-1. Увеличьте `tcp_timeout` в конфигурации
-2. Проверьте доступность принтера
-
-## Оптимизация скорости для Pantum BP5100DW
-
-Для достижения **максимальной скорости** (time-to-first-page < 3 сек) выполните следующие шаги:
-
-### 1. Настройка Windows (Kiosk Mode)
-*   **Print directly to the printer:** 
-    `Панель управления` -> `Устройства и принтеры` -> Правый клик по Pantum -> `Свойства принтера` -> `Дополнительно` -> Выбрать **«Печатать прямо на принтер»**. Это убирает задержку на запись во временный файл спулера.
-*   **Render print jobs on client computers:** Отключите эту опцию в свойствах принтера (вкладка «Общие» или «Дополнительно»), если процессор киоска слабее процессора принтера (в случае с BP5100DW лучше оставить включенным).
-
-### 2. Аппаратные настройки принтера (через Web-интерфейс)
-*   **Тихий режим (Quiet Mode):** ДОЛЖЕН БЫТЬ ВЫКЛЮЧЕН. Снижает скорость печати в 2 раза.
-*   **Эко-режим:** ВЫКЛЮЧИТЬ.
-*   **Таймер спящего режима:** Установите на 60 или 120 минут. Это предотвратит остывание печки между редкими клиентами.
-
-### 3. Программная оптимизация
-*   Используйте метод `print_pdf_direct_tcp` для мгновенной отправки PDF по сети.
-*   Используйте `PyMuPDF` (библиотека `fitz`) для сборки PDF — это в 10 раз быстрее, чем Pillow.
-
-### 4. Постоянное соединение (Persistent Connection)
-Для киоска удержание сокета открытым позволяет сэкономить ~100мс на каждом задании. В `FastPrinter` реализована логика `auto_reconnect`, которая восстановит связь, если принтер её разорвет по тайм-ауту.
+---
+Разработано специально для интеграции с проектом **PtPrint**.

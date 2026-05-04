@@ -1,8 +1,0 @@
-# Fixtures directory
-
-Place test fixture files here:
-- sample.pdf (1-page PDF for basic tests)
-- sample.docx (simple DOCX for basic tests)
-- large_document.pdf (10+ pages for load tests)
-
-These files are used by the test suite.
