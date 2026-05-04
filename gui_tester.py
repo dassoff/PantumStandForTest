@@ -35,6 +35,8 @@ class AppConfig:
     """Model for application configuration."""
     ip: str = "192.168.1.100"
     win_printer: str = ""
+    flatten: bool = True
+    resolution: int = 600
 
 
 class ConfigManager:
@@ -71,7 +73,7 @@ class FileConverter:
         """Converts a given file to PDF based on its extension."""
         ext = Path(file_path).suffix.lower()
         if ext == ".pdf":
-            return file_path
+            return await FileConverter.repair_pdf(file_path)
             
         if ext == ".docx":
             return await docx_to_pdf(file_path)
@@ -83,6 +85,21 @@ class FileConverter:
             return await asyncio.to_thread(FileConverter._convert_text, file_path)
             
         raise ValueError(f"Неизвестный или неподдерживаемый формат: {ext}")
+
+    @staticmethod
+    async def repair_pdf(file_path: str) -> str:
+        """Очистка и восстановление PDF через PyMuPDF."""
+        import fitz
+        out_path = str(Path(file_path).with_suffix('.repaired.pdf'))
+        try:
+            def _repair():
+                doc = fitz.open(file_path)
+                doc.save(out_path, clean=True, deflate=True)
+                doc.close()
+                return out_path
+            return await asyncio.to_thread(_repair)
+        except Exception:
+            return file_path # Возвращаем оригинал если не вышло
 
     @staticmethod
     def _convert_image(file_path: str) -> str:
@@ -121,7 +138,7 @@ class PrintTestingService:
     def __init__(self, logger_callback: Callable[[str, str], None]):
         self.log = logger_callback
 
-    async def execute_all_tests(self, file_path: str, ip: str, win_printer: str, flatten: bool = False) -> None:
+    async def execute_all_tests(self, file_path: str, ip: str, win_printer: str, flatten: bool = False, resolution: int = 600) -> None:
         """Executes all print strategies sequentially."""
         try:
             # 1. Preparation
@@ -131,9 +148,9 @@ class PrintTestingService:
 
             # 2. Flattening if requested
             if flatten:
-                self.log(f"[Оптимизация] Сплющивание PDF для ускорения процессора принтера...", "warning")
+                self.log(f"[Оптимизация] Сплющивание PDF (DPI: {resolution}) для ускорения процессора принтера...", "warning")
                 printer_temp = FastPrinter(printer_ip=ip)
-                pdf_path = await printer_temp.flatten_pdf(pdf_path)
+                pdf_path = await printer_temp.flatten_pdf(pdf_path, dpi=resolution)
                 self.log(f"[Оптимизация] PDF сплющен: {os.path.basename(pdf_path)}\n", "success")
 
             # 3. Printer Initialization
@@ -141,11 +158,16 @@ class PrintTestingService:
 
             # 3. Define Strategies
             strategies = [
-                ("Прямая TCP печать RAW PDF (Сетевой)", self._test_direct_tcp),
+                ("Прямая TCP печать RAW PDF (Сетевой)", lambda p, path: self._test_direct_tcp(p, path, resolution)),
                 ("Windows RAW Spooler (Локальный)", self._test_win32_raw),
                 ("SumatraPDF (Продакшен метод)", self._test_sumatra),
                 ("PCL6 по TCP (Резервный конвертер)", self._test_pcl6_tcp)
             ]
+
+
+            # 3. Smart Method Selection (Optional info)
+            best_method = self._suggest_best_method(pdf_path)
+            self.log(f"🤖 Рекомендация: {best_method}\n", "info")
 
             # 4. Execute Strategies
             for index, (name, strategy_func) in enumerate(strategies):
@@ -161,6 +183,8 @@ class PrintTestingService:
 
         except Exception as e:
             self.log(f"\nКРИТИЧЕСКАЯ ОШИБКА ТЕСТИРОВАНИЯ: {e}", "error")
+
+
 
     async def _prepare_pdf(self, file_path: str) -> Optional[str]:
         ext = Path(file_path).suffix.lower()
@@ -182,6 +206,13 @@ class PrintTestingService:
                 self.log(f"[Подготовка] ОШИБКА: {e}", "error")
                 return None
         return file_path
+
+    def _suggest_best_method(self, pdf_path: str) -> str:
+        """Анализ файла и выбор оптимальной стратегии."""
+        size_mb = os.path.getsize(pdf_path) / (1024 * 1024)
+        if size_mb > 15:
+            return "Сплющивание + Win32 RAW (Тяжелый файл)"
+        return "Direct TCP (Быстрый старт)"
 
     async def _run_single_strategy(self, strategy: Callable, printer: FastPrinter, pdf_path: str) -> Tuple[float, bool, str]:
         t0 = time.time()
@@ -211,13 +242,15 @@ class PrintTestingService:
 
     # --- Print Strategies ---
 
-    async def _test_direct_tcp(self, printer: FastPrinter, pdf_path: str) -> Tuple[bool, str]:
+    async def _test_direct_tcp(self, printer: FastPrinter, pdf_path: str, resolution: int = 600) -> Tuple[bool, str]:
         if not printer.printer_ip or printer.printer_ip == "0.0.0.0":
             return False, "Не указан корректный IP принтера."
-        job = await printer.print_pdf_direct_tcp(pdf_path, copies=1, duplex=False)
+        job = await printer.print_pdf_direct_tcp(pdf_path, copies=1, duplex=False, resolution=resolution)
         if job.status.value == "completed":
-            return True, "Отправлено на TCP порт 9100 напрямую."
+            return True, f"Отправлено на TCP (DPI: {resolution})"
         return False, job.error or "Неизвестная ошибка отправки"
+
+
 
     async def _test_win32_raw(self, printer: FastPrinter, pdf_path: str) -> Tuple[bool, str]:
         if not WIN32_AVAILABLE:
@@ -267,7 +300,8 @@ class PrintTesterApp(tk.Tk):
         self.selected_file = tk.StringVar()
         self.printer_ip = tk.StringVar(value=self.config.ip)
         self.selected_win_printer = tk.StringVar(value=self.config.win_printer)
-        self.use_flattening = tk.BooleanVar(value=False)
+        self.use_flattening = tk.BooleanVar(value=self.config.flatten)
+        self.selected_resolution = tk.IntVar(value=self.config.resolution)
 
     def _setup_styles(self) -> None:
         style = ttk.Style(self)
@@ -310,8 +344,14 @@ class PrintTesterApp(tk.Tk):
         self.lbl_toner = ttk.Label(self.status_bar, text="Тонер: --%")
         self.lbl_toner.pack(side="left", padx=10)
         
+        self.lbl_drum = ttk.Label(self.status_bar, text="Барабан: --%")
+        self.lbl_drum.pack(side="left", padx=10)
+        
         self.lbl_pages = ttk.Label(self.status_bar, text="Счетчик: --")
         self.lbl_pages.pack(side="left", padx=10)
+        
+        self.lbl_ping = ttk.Label(self.status_bar, text="Пинг: -- мс")
+        self.lbl_ping.pack(side="left", padx=10)
         
         self.lbl_status = ttk.Label(self.status_bar, text="Статус: Ожидание...")
         self.lbl_status.pack(side="right", padx=10)
@@ -336,11 +376,19 @@ class PrintTesterApp(tk.Tk):
     def _update_status_ui(self, status) -> None:
         if status.online:
             toner = status.snmp_data.get("toner_level", 0) if status.snmp_data else 0
+            drum = status.snmp_data.get("drum_level", 0) if status.snmp_data else 0
             pages = status.snmp_data.get("pages_printed", 0) if status.snmp_data else 0
+            latency = status.snmp_data.get("latency_ms", 0) if status.snmp_data else 0
             err = status.snmp_data.get("error") if status.snmp_data else None
             
-            self.lbl_toner.config(text=f"Тонер: {toner}%")
+            self.lbl_toner.config(text=f"Тонер: {toner}%", foreground="orange" if toner < 15 else "black")
+            self.lbl_drum.config(text=f"Барабан: {drum}%", foreground="orange" if drum < 15 else "black")
             self.lbl_pages.config(text=f"Счетчик: {pages}")
+            
+            if latency >= 0:
+                self.lbl_ping.config(text=f"Пинг: {latency} мс", foreground="red" if latency > 100 else "green")
+            else:
+                self.lbl_ping.config(text="Пинг: ОШИБКА", foreground="red")
             
             if err:
                 self.lbl_status.config(text=f"⚠️ {err}", foreground="red")
@@ -368,8 +416,12 @@ class PrintTesterApp(tk.Tk):
         self.cb_printers = ttk.Combobox(frame, textvariable=self.selected_win_printer, state="readonly")
         self.cb_printers.grid(row=1, column=1, sticky="we", pady=5, padx=(10, 0))
         
-        ttk.Checkbutton(frame, text="Сплющивать PDF (Flattening) для ускорения обработки принтером", 
-                        variable=self.use_flattening).grid(row=2, column=0, columnspan=2, sticky="w", pady=5)
+        ttk.Checkbutton(frame, text="Сплющивать PDF (Flattening)", 
+                        variable=self.use_flattening).grid(row=2, column=0, sticky="w", pady=5)
+        
+        ttk.Label(frame, text="DPI:").grid(row=2, column=1, sticky="e", pady=5)
+        self.cb_dpi = ttk.Combobox(frame, textvariable=self.selected_resolution, values=[300, 600, 1200], width=5, state="readonly")
+        self.cb_dpi.grid(row=2, column=2, sticky="w", pady=5, padx=(5, 0))
 
     def _create_action_section(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)
@@ -384,7 +436,18 @@ class PrintTesterApp(tk.Tk):
         ttk.Button(btn_grid, text="🔥 Прогрев печки", command=self.wake_printer).grid(row=0, column=0, padx=(0, 10), sticky="nsew")
         self.btn_test = ttk.Button(btn_grid, text="🚀 ЗАПУСТИТЬ ТЕСТИРОВАНИЕ МЕТОДОВ", style="Action.TButton", command=self.start_testing)
         self.btn_test.grid(row=0, column=1, padx=(0, 10), sticky="nsew")
-        ttk.Button(btn_grid, text="📊 Отчет", command=self.show_report).grid(row=0, column=2, sticky="nsew")
+        ttk.Button(btn_grid, text="📊 Отчет", command=self.show_report).grid(row=0, column=2, padx=(0, 10), sticky="nsew")
+        ttk.Button(btn_grid, text="📟 Текст на LCD", command=self.set_lcd_message).grid(row=0, column=3, padx=(0, 10), sticky="nsew")
+        ttk.Button(btn_grid, text="🛑 ОТМЕНА", style="Error.TButton", command=self.cancel_printing).grid(row=0, column=4, padx=(0, 10), sticky="nsew")
+        
+        # Вторая строка кнопок (Админские)
+        admin_grid = ttk.Frame(frame)
+        admin_grid.pack(fill="x", pady=(5, 0))
+        admin_grid.columnconfigure(0, weight=1)
+        admin_grid.columnconfigure(1, weight=1)
+        
+        ttk.Button(admin_grid, text="🩺 ГЛУБОКАЯ ДИАГНОСТИКА", command=self.run_deep_check).grid(row=0, column=0, padx=(0, 10), sticky="nsew")
+        ttk.Button(admin_grid, text="🔄 ПЕРЕЗАГРУЗИТЬ ПРИНТЕР", command=self.reboot_printer_ui).grid(row=0, column=1, sticky="nsew")
         
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
 
@@ -500,6 +563,24 @@ class PrintTesterApp(tk.Tk):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 found = loop.run_until_complete(discover_printers(subnet=subnet, timeout=0.5))
+                
+                # Bonjour / mDNS Discovery
+                try:
+                    from zeroconf import Zeroconf, ServiceBrowser
+                    class MyListener:
+                        def add_service(self, zc, type_, name):
+                            info = zc.get_service_info(type_, name)
+                            if info and info.addresses:
+                                ip = socket.inet_ntoa(info.addresses[0])
+                                found[ip] = name
+                    
+                    zc = Zeroconf()
+                    ServiceBrowser(zc, "_printer._tcp.local.", MyListener())
+                    time.sleep(1.0)
+                    zc.close()
+                except Exception:
+                    pass
+                
                 loop.close()
                 
                 if found:
@@ -577,7 +658,8 @@ class PrintTesterApp(tk.Tk):
                     file_path=self.selected_file.get(),
                     ip=self.config.ip,
                     win_printer=self.config.win_printer,
-                    flatten=self.use_flattening.get()
+                    flatten=self.use_flattening.get(),
+                    resolution=self.selected_resolution.get()
                 )
             )
         finally:
@@ -592,6 +674,71 @@ class PrintTesterApp(tk.Tk):
         self.safe_log("✅ ТЕСТИРОВАНИЕ ПОЛНОСТЬЮ ЗАВЕРШЕНО", "success")
         self.safe_log(f"{'='*60}", "header")
 
+    def cancel_printing(self) -> None:
+        ip = self.printer_ip.get().strip()
+        if not ip: return
+        
+        if messagebox.askyesno("Отмена", "Вы действительно хотите прервать печать?"):
+            def _cancel():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                printer = FastPrinter(printer_ip=ip)
+                loop.run_until_complete(printer.cancel_all_jobs())
+                self.after(0, lambda: self.safe_log("🛑 Команда экстренной отмены отправлена!", "error"))
+                loop.close()
+            threading.Thread(target=_cancel, daemon=True).start()
+
+    def set_lcd_message(self) -> None:
+        from tkinter import simpledialog
+        ip = self.printer_ip.get().strip()
+        if not ip: return
+        
+        msg = simpledialog.askstring("LCD", "Введите текст для экрана принтера (макс 16 симв):", initialvalue="PTPRINT READY")
+        if msg:
+            def _set():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                printer = FastPrinter(printer_ip=ip)
+                loop.run_until_complete(printer.set_ready_message(msg))
+                self.after(0, lambda: self.safe_log(f"📟 На экран принтера отправлено: {msg}", "success"))
+                loop.close()
+            threading.Thread(target=_set, daemon=True).start()
+
+    def run_deep_check(self) -> None:
+        ip = self.printer_ip.get().strip()
+        if not ip: return
+        
+        self.safe_log("🩺 Запуск глубокой диагностики портов...", "warning")
+        
+        def _check():
+            from core.network import NetworkPrinter
+            net = NetworkPrinter(ip)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            report = loop.run_until_complete(net.deep_health_check())
+            
+            self.safe_log("\n--- ОТЧЕТ ПО ПОРТАМ ---", "header")
+            for name, status in report.items():
+                tag = "success" if "ONLINE" in status or "OPEN" in status else "error"
+                self.safe_log(f"  {name}: {status}", tag)
+            self.safe_log("-----------------------\n", "header")
+            loop.close()
+            
+        threading.Thread(target=_check, daemon=True).start()
+
+    def reboot_printer_ui(self) -> None:
+        ip = self.printer_ip.get().strip()
+        if not ip: return
+        
+        if messagebox.askyesno("Рестарт", "Вы действительно хотите ПЕРЕЗАГРУЗИТЬ принтер?"):
+            def _reboot():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                printer = FastPrinter(printer_ip=ip)
+                loop.run_until_complete(printer.reboot_printer())
+                self.after(0, lambda: self.safe_log("🔄 Команда на перезагрузку отправлена!", "warning"))
+                loop.close()
+            threading.Thread(target=_reboot, daemon=True).start()
 
 if __name__ == "__main__":
     # Настраиваем базовое логирование, чтобы системные ошибки не терялись

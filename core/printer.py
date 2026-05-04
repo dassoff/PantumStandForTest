@@ -208,9 +208,10 @@ class FastPrinter:
         pdf_path: str,
         copies: int = 1,
         duplex: bool = False,
+        resolution: int = 600,
         job_name: str = "PantumTestJob"
     ) -> PrintJob:
-        """Печать PDF напрямую через TCP порт 9100 с PJL именованием."""
+        """Печать PDF напрямую через TCP порт 9100 с PJL именованием и DPI."""
         job = PrintJob(
             file_path=pdf_path,
             copies=copies,
@@ -222,10 +223,11 @@ class FastPrinter:
             with open(pdf_path, "rb") as f:
                 pdf_data = f.read()
 
-            # PJL заголовок с именем задания
+            # PJL заголовок с именем задания и разрешением
             pjl_header = (
                 b"\x1b%-12345X@PJL JOB NAME = \"" + job_name.encode('utf-8') + b"\"\r\n"
                 b"@PJL SET COPIES = " + str(copies).encode() + b"\r\n"
+                b"@PJL SET RESOLUTION = " + str(resolution).encode() + b"\r\n"
                 b"@PJL ENTER LANGUAGE = PDF\r\n"
             )
             pjl_footer = b"\x1b%-12345X@PJL EOJ\r\n\x1b%-12345X"
@@ -327,6 +329,56 @@ class FastPrinter:
             return True, "Успешно"
         except Exception as e:
             return False, str(e)
+
+
+    async def set_ready_message(self, message: str) -> bool:
+        """Установка кастомного текста на дисплее принтера."""
+        if not self.printer_ip:
+            return False
+        try:
+            pjl_msg = (
+                b"\x1b%-12345X@PJL RDYMSG DISPLAY = \"" + message.encode('utf-8')[:16] + b"\"\r\n"
+                b"\x1b%-12345X"
+            )
+            await self.network_printer.send_raw(pjl_msg)
+            return True
+        except Exception:
+            return False
+
+    async def cancel_all_jobs(self) -> bool:
+        """Экстренная отмена текущего задания на принтере."""
+        if not self.printer_ip:
+            return False
+        try:
+            # PJL команда отмены текущего задания
+            pjl_cancel = (
+                b"\x1b%-12345X@PJL\r\n"
+                b"@PJL JOB\r\n"
+                b"@PJL CANCELJOB\r\n"
+                b"@PJL EOJ\r\n"
+                b"\x1b%-12345X"
+            )
+            await self.network_printer.send_raw(pjl_cancel)
+            return True
+        except Exception:
+            return False
+
+    async def reboot_printer(self) -> bool:
+        """Удаленная перезагрузка принтера через PJL."""
+        if not self.printer_ip:
+            return False
+        try:
+            # Команда перезагрузки (Reset/Reboot)
+            pjl_reboot = (
+                b"\x1b%-12345X@PJL OPMSG DISPLAY = \"REBOOTING...\"\r\n"
+                b"@PJL INITIALIZE\r\n"
+                b"\x1b%-12345X"
+            )
+            await self.network_printer.send_raw(pjl_reboot)
+            return True
+        except Exception:
+            return False
+
 
 
     async def _execute_job(self, job: PrintJob) -> PrintJob:

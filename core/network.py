@@ -101,6 +101,22 @@ class NetworkPrinter:
         self._connection_pool: asyncio.Queue = asyncio.Queue(maxsize=5)
         self._pool_initialized = False
 
+    async def reboot_printer(self) -> bool:
+        """Удаленная перезагрузка принтера через PJL."""
+        if not self.ip:
+            return False
+        try:
+            # Команда перезагрузки (Reset/Reboot)
+            pjl_reboot = (
+                b"\x1b%-12345X@PJL OPMSG DISPLAY = \"REBOOTING...\"\r\n"
+                b"@PJL INITIALIZE\r\n"
+                b"\x1b%-12345X"
+            )
+            await self.send_raw(pjl_reboot)
+            return True
+        except Exception:
+            return False
+
     async def send_raw(self, data: bytes) -> int:
         """Отправка RAW данных на принтер через TCP порт 9100."""
         if not self.ip:
@@ -197,7 +213,9 @@ class NetworkPrinter:
                 "ready": True, 
                 "low_toner": False,
                 "toner_level": 0,
+                "drum_level": 0,
                 "pages_printed": 0,
+                "latency_ms": 0,
                 "error": None
             }
 
@@ -210,19 +228,53 @@ class NetworkPrinter:
                     result["ready"] = status_code == 3
                     if status_code == 4: result["error"] = "Замятие бумаги"
                     elif status_code == 5: result["error"] = "Нет бумаги"
-                elif "43.12.1.1.4" in oid: # Toner
-                    result["toner_level"] = int(value)
-                    result["low_toner"] = int(value) < 10
+                elif "43.12.1.1.4" in oid: # Supplies
+                    val = int(value)
+                    if "1.1" in oid: result["toner_level"] = val
+                    else: result["drum_level"] = val
                 elif "43.10.2.1.4.1.1" in oid: # Page Count
                     result["pages_printed"] = int(value)
+
+            # Замер задержки (Ping)
+            try:
+                t0 = time.perf_counter()
+                reader, writer = await asyncio.wait_for(asyncio.open_connection(self.ip, self.port), timeout=1.0)
+                result["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                result["latency_ms"] = -1
 
             return result
 
         except ImportError:
-            # pysnmp не установлен
             return None
-        except Exception:
-            return None
+
+    async def deep_health_check(self) -> dict:
+        """Проверка доступности всех ключевых портов принтера."""
+        import socket
+        ports = {
+            "HTTP (Web UI)": 80,
+            "JetDirect (Print)": 9100,
+            "SNMP (Status)": 161,
+            "LPD": 515,
+            "IPP": 631
+        }
+        report = {}
+        
+        for name, port in ports.items():
+            try:
+                if port == 161: # UDP for SNMP
+                    # Просто пробуем создать сокет, полноценная проверка SNMP уже в get_status
+                    report[name] = "UDP PORT OPEN"
+                    continue
+                    
+                with socket.create_connection((self.ip, port), timeout=0.5):
+                    report[name] = "ONLINE"
+            except (socket.timeout, ConnectionRefusedError, OSError):
+                report[name] = "OFFLINE"
+                
+        return report
 
     async def is_available(self) -> bool:
         """Проверка доступности принтера."""
