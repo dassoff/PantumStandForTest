@@ -193,17 +193,28 @@ class NetworkPrinter:
             if error_indication:
                 return None
 
-            result = {"ready": True, "low_toner": False}
+            result = {
+                "ready": True, 
+                "low_toner": False,
+                "toner_level": 0,
+                "pages_printed": 0,
+                "error": None
+            }
 
             for var_bind in var_binds:
                 oid = str(var_bind[0])
                 value = var_bind[1]
 
-                if self.SNMP_OIDS["status"] in oid:
-                    result["ready"] = int(value) == 3  # 3 = idle/ready
-                elif self.SNMP_OIDS["marker_supplies"] in oid:
-                    # Проверяем уровень тонера
+                if "43.18.1.1.5.1.1" in oid: # Status
+                    status_code = int(value)
+                    result["ready"] = status_code == 3
+                    if status_code == 4: result["error"] = "Замятие бумаги"
+                    elif status_code == 5: result["error"] = "Нет бумаги"
+                elif "43.12.1.1.4" in oid: # Toner
+                    result["toner_level"] = int(value)
                     result["low_toner"] = int(value) < 10
+                elif "43.10.2.1.4.1.1" in oid: # Page Count
+                    result["pages_printed"] = int(value)
 
             return result
 

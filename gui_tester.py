@@ -11,6 +11,8 @@ import os
 import time
 import json
 import logging
+import csv
+import socket
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Callable, Tuple, Optional
@@ -119,7 +121,7 @@ class PrintTestingService:
     def __init__(self, logger_callback: Callable[[str, str], None]):
         self.log = logger_callback
 
-    async def execute_all_tests(self, file_path: str, ip: str, win_printer: str) -> None:
+    async def execute_all_tests(self, file_path: str, ip: str, win_printer: str, flatten: bool = False) -> None:
         """Executes all print strategies sequentially."""
         try:
             # 1. Preparation
@@ -127,7 +129,14 @@ class PrintTestingService:
             if not pdf_path:
                 return
 
-            # 2. Printer Initialization
+            # 2. Flattening if requested
+            if flatten:
+                self.log(f"[Оптимизация] Сплющивание PDF для ускорения процессора принтера...", "warning")
+                printer_temp = FastPrinter(printer_ip=ip)
+                pdf_path = await printer_temp.flatten_pdf(pdf_path)
+                self.log(f"[Оптимизация] PDF сплющен: {os.path.basename(pdf_path)}\n", "success")
+
+            # 3. Printer Initialization
             printer = FastPrinter(printer_ip=ip, printer_name=win_printer, printer_port=9100)
 
             # 3. Define Strategies
@@ -141,7 +150,10 @@ class PrintTestingService:
             # 4. Execute Strategies
             for index, (name, strategy_func) in enumerate(strategies):
                 self.log(f"▶ ЗАПУСК: {name}", "header")
-                await self._run_single_strategy(strategy_func, printer, pdf_path)
+                t_elapsed, success, msg = await self._run_single_strategy(strategy_func, printer, pdf_path)
+                
+                # Сохранение статистики
+                self._save_stat(name, os.path.basename(file_path), t_elapsed, success, flatten)
 
                 if index < len(strategies) - 1:
                     self.log("  ⏳ Ожидание 8 секунд для очистки памяти принтера...\n", "warning")
@@ -164,13 +176,14 @@ class PrintTestingService:
                     pdf_path = await FileConverter.convert_to_pdf(file_path)
                 
                 self.log(f"[Подготовка] Успешно: {os.path.basename(pdf_path)}\n", "success")
+                self._update_preview(pdf_path)
                 return pdf_path
             except Exception as e:
                 self.log(f"[Подготовка] ОШИБКА: {e}", "error")
                 return None
         return file_path
 
-    async def _run_single_strategy(self, strategy: Callable, printer: FastPrinter, pdf_path: str) -> None:
+    async def _run_single_strategy(self, strategy: Callable, printer: FastPrinter, pdf_path: str) -> Tuple[float, bool, str]:
         t0 = time.time()
         try:
             success, msg = await strategy(printer, pdf_path)
@@ -179,9 +192,22 @@ class PrintTestingService:
                 self.log(f"  └─ [V] УСПЕХ: {msg} (Заняло {t_elapsed:.3f} сек.)\n", "success")
             else:
                 self.log(f"  └─ [X] ОШИБКА: {msg} (Заняло {t_elapsed:.3f} сек.)\n", "error")
+            return t_elapsed, success, msg
         except Exception as e:
             t_elapsed = time.time() - t0
             self.log(f"  └─ [!] СБОЙ: {str(e)} (Заняло {t_elapsed:.3f} сек.)\n", "error")
+            return t_elapsed, False, str(e)
+
+    def _save_stat(self, method: str, filename: str, duration: float, success: bool, flattened: bool) -> None:
+        file_exists = os.path.isfile("print_stats.csv")
+        with open("print_stats.csv", "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Timestamp", "Method", "File", "Duration", "Success", "Flattened"])
+            writer.writerow([
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                method, filename, f"{duration:.4f}", success, flattened
+            ])
 
     # --- Print Strategies ---
 
@@ -235,11 +261,13 @@ class PrintTesterApp(tk.Tk):
         self._setup_styles()
         self._create_widgets()
         self._load_printers()
+        self._start_status_loop()
 
     def _setup_variables(self) -> None:
         self.selected_file = tk.StringVar()
         self.printer_ip = tk.StringVar(value=self.config.ip)
         self.selected_win_printer = tk.StringVar(value=self.config.win_printer)
+        self.use_flattening = tk.BooleanVar(value=False)
 
     def _setup_styles(self) -> None:
         style = ttk.Style(self)
@@ -255,10 +283,71 @@ class PrintTesterApp(tk.Tk):
         main_frame = ttk.Frame(self, padding="15")
         main_frame.pack(fill="both", expand=True)
 
-        self._create_file_section(main_frame)
-        self._create_printer_section(main_frame)
-        self._create_action_section(main_frame)
-        self._create_log_section(main_frame)
+        # Layout: Left column (controls) and Right column (preview)
+        content_grid = ttk.Frame(main_frame)
+        content_grid.pack(fill="both", expand=True)
+        content_grid.columnconfigure(0, weight=3)
+        content_grid.columnconfigure(1, weight=1)
+
+        left_pane = ttk.Frame(content_grid)
+        left_pane.grid(row=0, column=0, sticky="nsew", padx=(0, 15))
+        
+        self._create_file_section(left_pane)
+        self._create_printer_section(left_pane)
+        self._create_action_section(left_pane)
+        self._create_log_section(left_pane)
+        
+        # Preview Pane
+        preview_frame = ttk.LabelFrame(content_grid, text=" Предпросмотр ", padding="10")
+        preview_frame.grid(row=0, column=1, sticky="nsew")
+        self.preview_label = ttk.Label(preview_frame, text="Нет файла для\nпредпросмотра", justify="center")
+        self.preview_label.pack(fill="both", expand=True)
+
+        # Status Bar at the very bottom
+        self.status_bar = ttk.Frame(self, relief="sunken", padding=(5, 2))
+        self.status_bar.pack(side="bottom", fill="x")
+        
+        self.lbl_toner = ttk.Label(self.status_bar, text="Тонер: --%")
+        self.lbl_toner.pack(side="left", padx=10)
+        
+        self.lbl_pages = ttk.Label(self.status_bar, text="Счетчик: --")
+        self.lbl_pages.pack(side="left", padx=10)
+        
+        self.lbl_status = ttk.Label(self.status_bar, text="Статус: Ожидание...")
+        self.lbl_status.pack(side="right", padx=10)
+
+    def _start_status_loop(self) -> None:
+        """Фоновый поток для опроса статуса принтера."""
+        def _loop():
+            while True:
+                ip = self.printer_ip.get().strip()
+                if ip and ip != "192.168.1.100": # Не опрашиваем дефолт
+                    try:
+                        from core.network import NetworkPrinter
+                        printer = NetworkPrinter(ip)
+                        status = asyncio.run(printer.get_status())
+                        self.after(0, self._update_status_ui, status)
+                    except Exception:
+                        pass
+                time.sleep(10)
+        
+        threading.Thread(target=_loop, daemon=True).start()
+
+    def _update_status_ui(self, status) -> None:
+        if status.online:
+            toner = status.snmp_data.get("toner_level", 0) if status.snmp_data else 0
+            pages = status.snmp_data.get("pages_printed", 0) if status.snmp_data else 0
+            err = status.snmp_data.get("error") if status.snmp_data else None
+            
+            self.lbl_toner.config(text=f"Тонер: {toner}%")
+            self.lbl_pages.config(text=f"Счетчик: {pages}")
+            
+            if err:
+                self.lbl_status.config(text=f"⚠️ {err}", foreground="red")
+            else:
+                self.lbl_status.config(text="✅ Готов", foreground="green")
+        else:
+            self.lbl_status.config(text="❌ Офлайн", foreground="gray")
 
     def _create_file_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text=" 1. Выбор файла (PDF, DOCX, TXT, IMG) ", padding="10")
@@ -273,17 +362,30 @@ class PrintTesterApp(tk.Tk):
         
         ttk.Label(frame, text="IP-адрес (TCP 9100):").grid(row=0, column=0, sticky="w", pady=5)
         ttk.Entry(frame, textvariable=self.printer_ip).grid(row=0, column=1, sticky="we", pady=5, padx=(10, 0))
+        ttk.Button(frame, text="🔍 Найти принтеры", command=self.discover_printers).grid(row=0, column=2, padx=(10, 0))
         
         ttk.Label(frame, text="Windows Принтер:").grid(row=1, column=0, sticky="w", pady=5)
         self.cb_printers = ttk.Combobox(frame, textvariable=self.selected_win_printer, state="readonly")
         self.cb_printers.grid(row=1, column=1, sticky="we", pady=5, padx=(10, 0))
+        
+        ttk.Checkbutton(frame, text="Сплющивать PDF (Flattening) для ускорения обработки принтером", 
+                        variable=self.use_flattening).grid(row=2, column=0, columnspan=2, sticky="w", pady=5)
 
     def _create_action_section(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)
         frame.pack(fill="x", pady=(5, 15))
         
-        self.btn_test = ttk.Button(frame, text="🚀 ЗАПУСТИТЬ ТЕСТИРОВАНИЕ МЕТОДОВ", style="Action.TButton", command=self.start_testing)
-        self.btn_test.pack(fill="x", pady=(0, 10))
+        # Кнопки в ряд
+        btn_grid = ttk.Frame(frame)
+        btn_grid.pack(fill="x")
+        btn_grid.columnconfigure(0, weight=1)
+        btn_grid.columnconfigure(1, weight=3)
+        
+        ttk.Button(btn_grid, text="🔥 Прогрев печки", command=self.wake_printer).grid(row=0, column=0, padx=(0, 10), sticky="nsew")
+        self.btn_test = ttk.Button(btn_grid, text="🚀 ЗАПУСТИТЬ ТЕСТИРОВАНИЕ МЕТОДОВ", style="Action.TButton", command=self.start_testing)
+        self.btn_test.grid(row=0, column=1, padx=(0, 10), sticky="nsew")
+        ttk.Button(btn_grid, text="📊 Отчет", command=self.show_report).grid(row=0, column=2, sticky="nsew")
+        
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
 
     def _create_log_section(self, parent: ttk.Frame) -> None:
@@ -380,6 +482,92 @@ class PrintTesterApp(tk.Tk):
         
         threading.Thread(target=self._test_runner, daemon=True).start()
 
+    def discover_printers(self) -> None:
+        self.safe_log("🔍 Поиск принтеров в локальной сети...", "warning")
+        
+        def _scan():
+            try:
+                # Определяем подсеть
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+                
+                subnet = ".".join(local_ip.split(".")[:-1])
+                self.safe_log(f"📡 Сканирование подсети {subnet}.0/24...")
+                
+                from core.network import discover_printers
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                found = loop.run_until_complete(discover_printers(subnet=subnet, timeout=0.5))
+                loop.close()
+                
+                if found:
+                    self.safe_log(f"✅ Найдено принтеров: {len(found)}", "success")
+                    for ip in found:
+                        self.safe_log(f"  - {ip} (готов к печати)")
+                    # Ставим первый найденный IP в поле
+                    self.printer_ip.set(list(found.keys())[0])
+                else:
+                    self.safe_log("❌ Принтеры не найдены. Проверьте сеть или введите IP вручную.", "error")
+            except Exception as e:
+                self.safe_log(f"❌ Ошибка при поиске: {e}", "error")
+                
+        threading.Thread(target=_scan, daemon=True).start()
+
+    def show_report(self) -> None:
+        if not os.path.exists("print_stats.csv"):
+            messagebox.showinfo("Инфо", "Статистика пока пуста. Проведите тесты!")
+            return
+            
+        # Простое открытие файла в системе
+        os.startfile("print_stats.csv") if hasattr(os, 'startfile') else os.system(f'open "print_stats.csv"')
+
+    def _update_preview(self, pdf_path: str) -> None:
+        """Обновление картинки предпросмотра."""
+        def _render():
+            try:
+                import fitz
+                from PIL import Image, ImageTk
+                doc = fitz.open(pdf_path)
+                page = doc[0]
+                # Масштабируем для превью
+                pix = page.get_pixmap(matrix=fitz.Matrix(0.15, 0.15))
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                photo = ImageTk.PhotoImage(img)
+                
+                self.after(0, self._set_preview_image, photo)
+                doc.close()
+            except Exception as e:
+                print(f"Preview error: {e}")
+
+        threading.Thread(target=_render, daemon=True).start()
+
+    def _set_preview_image(self, photo) -> None:
+        self.preview_label.config(image=photo, text="")
+        self.preview_label.image = photo
+
+    def wake_printer(self) -> None:
+        ip = self.printer_ip.get().strip()
+        if not ip:
+            messagebox.showwarning("Внимание", "Введите IP принтера для прогрева!")
+            return
+            
+        self.safe_log(f"♨️ Отправка команды прогрева на {ip}...", "warning")
+        
+        def _wake():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            printer = FastPrinter(printer_ip=ip)
+            success, msg = loop.run_until_complete(printer.wake_up())
+            if success:
+                self.safe_log("✅ Принтер получил команду и начал прогрев (без печати листа).", "success")
+            else:
+                self.safe_log(f"❌ Не удалось отправить команду прогрева: {msg}", "error")
+            loop.close()
+            
+        threading.Thread(target=_wake, daemon=True).start()
+
     def _test_runner(self) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -388,7 +576,8 @@ class PrintTesterApp(tk.Tk):
                 self.print_service.execute_all_tests(
                     file_path=self.selected_file.get(),
                     ip=self.config.ip,
-                    win_printer=self.config.win_printer
+                    win_printer=self.config.win_printer,
+                    flatten=self.use_flattening.get()
                 )
             )
         finally:

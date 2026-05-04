@@ -279,13 +279,15 @@ async def image_to_pdf(
     # Используем asyncio.to_thread для блокирующих операций fitz
     def _convert():
         doc = fitz.open()
-        img = fitz.open(image_path)
-        rect = img[0].rect
-        pdfbytes = img.convert_to_pdf()
-        img.close()
-        imgpdf = fitz.open("pdf", pdfbytes)
+        
+        # Получаем размеры изображения для создания страницы
+        img_doc = fitz.open(image_path)
+        rect = img_doc[0].rect
+        img_doc.close()
+        
         page = doc.new_page(width=rect.width, height=rect.height)
-        page.show_pdf_page(rect, imgpdf, 0)
+        page.insert_image(rect, filename=image_path)
+        
         doc.save(output_path)
         doc.close()
         return output_path

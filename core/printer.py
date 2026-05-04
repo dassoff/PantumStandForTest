@@ -5,7 +5,7 @@ import os
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -100,6 +100,35 @@ class FastPrinter:
         self._current_job: Optional[PrintJob] = None
         self._job_history: List[PrintJob] = []
 
+    async def flatten_pdf(self, file_path: str, dpi: int = 600) -> str:
+        """
+        'Сплющивает' PDF, превращая страницы в высококачественные растровые изображения.
+        Это значительно ускоряет обработку PDF процессором принтера.
+        """
+        import fitz
+        out_path = str(Path(file_path).with_suffix('.flat.pdf'))
+        
+        def _flatten():
+            src_doc = fitz.open(file_path)
+            out_doc = fitz.open()
+            
+            for page in src_doc:
+                # Рендерим страницу в картинку (pixmap)
+                pix = page.get_pixmap(dpi=dpi)
+                
+                # Создаем новую страницу в выходном документе того же размера
+                new_page = out_doc.new_page(width=page.rect.width, height=page.rect.height)
+                # Вставляем картинку напрямую через pixmap
+                new_page.insert_image(new_page.rect, pixmap=pix)
+            
+            out_doc.save(out_path)
+            out_doc.close()
+            src_doc.close()
+            return out_path
+
+        return await asyncio.to_thread(_flatten)
+
+
     @classmethod
     def from_config(cls, config_path: Optional[str] = None) -> "FastPrinter":
         """Создание принтера из конфигурации."""
@@ -176,24 +205,40 @@ class FastPrinter:
 
     async def print_pdf_direct_tcp(
         self,
-        path: str,
+        pdf_path: str,
         copies: int = 1,
-        duplex: bool = True,
-        paper_size: str = "A4",
+        duplex: bool = False,
+        job_name: str = "PantumTestJob"
     ) -> PrintJob:
-        """Самый быстрый метод 1: Прямая отправка PDF через TCP (Native PDF).
-        Обходит конвертацию PCL6 и драйверы Windows.
-        Поддерживается принтерами серии Pantum BP5100DW.
-        """
+        """Печать PDF напрямую через TCP порт 9100 с PJL именованием."""
         job = PrintJob(
-            file_path=path,
-            file_type="pdf_direct",
+            file_path=pdf_path,
             copies=copies,
             duplex=duplex,
-            paper_size=paper_size,
-            method="direct_pdf_tcp",
+            method="direct_tcp",
         )
-        return await self._execute_job(job)
+
+        try:
+            with open(pdf_path, "rb") as f:
+                pdf_data = f.read()
+
+            # PJL заголовок с именем задания
+            pjl_header = (
+                b"\x1b%-12345X@PJL JOB NAME = \"" + job_name.encode('utf-8') + b"\"\r\n"
+                b"@PJL SET COPIES = " + str(copies).encode() + b"\r\n"
+                b"@PJL ENTER LANGUAGE = PDF\r\n"
+            )
+            pjl_footer = b"\x1b%-12345X@PJL EOJ\r\n\x1b%-12345X"
+
+            payload = pjl_header + pdf_data + pjl_footer
+            await self.network_printer.send_raw(payload)
+            job.status = PrintStatus.COMPLETED
+        except Exception as e:
+            job.status = PrintStatus.FAILED
+            job.error = str(e)
+
+        self._job_history.append(job)
+        return job
 
     async def print_pdf_win32_raw(
         self,
@@ -263,6 +308,26 @@ class FastPrinter:
         self._job_history.append(job)
 
         return job
+
+    async def wake_up(self) -> tuple[bool, str]:
+        """
+        'Умный' прогрев: отправляет пустую команду, чтобы принтер начал греть печку.
+        Лист при этом не печатается.
+        """
+        if not self.printer_ip:
+            return False, "IP не указан"
+            
+        try:
+            # Отправляем только PJL заголовок и команду INFO
+            pjl_wake = (
+                b"\x1b%-12345X@PJL INFO ID\r\n"
+                b"\x1b%-12345X"
+            )
+            await self.network_printer.send_raw(pjl_wake)
+            return True, "Успешно"
+        except Exception as e:
+            return False, str(e)
+
 
     async def _execute_job(self, job: PrintJob) -> PrintJob:
         """Выполнение задания печати."""
