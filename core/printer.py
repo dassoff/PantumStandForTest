@@ -174,6 +174,45 @@ class FastPrinter:
         )
         return await self._execute_job(job)
 
+    async def print_pdf_direct_tcp(
+        self,
+        path: str,
+        copies: int = 1,
+        duplex: bool = True,
+        paper_size: str = "A4",
+    ) -> PrintJob:
+        """Самый быстрый метод 1: Прямая отправка PDF через TCP (Native PDF).
+        Обходит конвертацию PCL6 и драйверы Windows.
+        Поддерживается принтерами серии Pantum BP5100DW.
+        """
+        job = PrintJob(
+            file_path=path,
+            file_type="pdf_direct",
+            copies=copies,
+            duplex=duplex,
+            paper_size=paper_size,
+            method="direct_pdf_tcp",
+        )
+        return await self._execute_job(job)
+
+    async def print_pdf_win32_raw(
+        self,
+        path: str,
+        copies: int = 1,
+        duplex: bool = True,
+    ) -> PrintJob:
+        """Самый быстрый метод 2: Отправка RAW PDF в Windows Spooler.
+        Быстрее чем SumatraPDF, так как обходит рендеринг и драйвер.
+        """
+        job = PrintJob(
+            file_path=path,
+            file_type="win32_raw",
+            copies=copies,
+            duplex=duplex,
+            method="win32_raw",
+        )
+        return await self._execute_job(job)
+
     async def print_raw_pcl(
         self,
         data: Union[bytes, str],
@@ -234,6 +273,10 @@ class FastPrinter:
         try:
             if job.file_type == "pdf":
                 await self._print_pdf_internal(job)
+            elif job.file_type == "pdf_direct":
+                await self._print_pdf_direct_internal(job)
+            elif job.file_type == "win32_raw":
+                await self._print_win32_raw_internal(job)
             elif job.file_type == "docx":
                 await self._print_docx_internal(job)
             elif job.file_type == "pcl":
@@ -317,6 +360,65 @@ class FastPrinter:
                 timeout=self.conversion_timeout,
             )
             await self._convert_and_print(pdf_path, job)
+
+    async def _print_pdf_direct_internal(self, job: PrintJob) -> None:
+        """Прямая отправка PDF файла на принтер (без конвертации)."""
+        job.status = PrintStatus.PRINTING
+        
+        pdf_data = job.file_data
+        if not pdf_data:
+            with open(job.file_path, "rb") as f:
+                pdf_data = f.read()
+
+        # Оборачиваем в PJL для настройки дуплекса и копий
+        pjl = b"\x1b%-12345X@PJL JOB\r\n"
+        if job.copies > 1:
+            pjl += f"@PJL SET COPIES={job.copies}\r\n".encode()
+        if job.duplex:
+            pjl += b"@PJL SET DUPLEX=ON\r\n@PJL SET BINDING=LONGEDGE\r\n"
+        else:
+            pjl += b"@PJL SET DUPLEX=OFF\r\n"
+        pjl += b"@PJL ENTER LANGUAGE=PDF\r\n"
+        
+        footer = b"\x1b%-12345X@PJL EOJ\r\n\x1b%-12345X"
+        final_data = pjl + pdf_data + footer
+        
+        await self.network_printer.send_raw(final_data)
+
+    async def _print_win32_raw_internal(self, job: PrintJob) -> None:
+        """Печать RAW PDF через Windows Spooler (pywin32)."""
+        import win32print
+        
+        job.status = PrintStatus.PRINTING
+        
+        data = job.file_data
+        if not data:
+            with open(job.file_path, "rb") as f:
+                data = f.read()
+                
+        # Настройка PJL
+        pjl = b"\x1b%-12345X@PJL JOB\r\n"
+        if job.copies > 1:
+            pjl += f"@PJL SET COPIES={job.copies}\r\n".encode()
+        if job.duplex:
+            pjl += b"@PJL SET DUPLEX=ON\r\n@PJL SET BINDING=LONGEDGE\r\n"
+        pjl += b"@PJL ENTER LANGUAGE=PDF\r\n"
+        footer = b"\x1b%-12345X@PJL EOJ\r\n\x1b%-12345X"
+        
+        final_data = pjl + data + footer
+
+        def _print_task():
+            hprinter = win32print.OpenPrinter(self.printer_name)
+            try:
+                win32print.StartDocPrinter(hprinter, 1, ("Pantum Fast PDF Print", None, "RAW"))
+                win32print.StartPagePrinter(hprinter)
+                win32print.WritePrinter(hprinter, final_data)
+                win32print.EndPagePrinter(hprinter)
+                win32print.EndDocPrinter(hprinter)
+            finally:
+                win32print.ClosePrinter(hprinter)
+
+        await asyncio.to_thread(_print_task)
 
     async def _print_pcl_internal(self, job: PrintJob) -> None:
         """Внутренний метод печати PCL."""
